@@ -2,7 +2,7 @@
 
 The release workflow checks that the pushed tag (v<version>) matches __version__."""
 
-__version__ = "2.2.1"
+__version__ = "2.2.2"
 
 # Shown in the footer and the log
 EDFC_VERSION = f"V{__version__}"

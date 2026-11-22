@@ -6,6 +6,8 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [2.2.2] - 2026-11-22
+
 ### Fixed
 
 - Wait for Status.json to confirm that FSD mass lock has cleared before supercruise entry or hyperspace charging; unreadable status or a timeout now stops the assist safely.
