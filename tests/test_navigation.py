@@ -55,6 +55,21 @@ class StationNavigationTestCase(unittest.TestCase):
             self.assertFalse(self.panel.lock_destination("Ohm City"))
         self.assertFalse(any(call.args[0] == "UI_Select" for call in self.panel.keys.send.call_args_list))
 
+    def test_short_leading_ocr_prefix_is_removed_only_for_the_exact_station_name(self):
+        for recognized in ("1A THE BROWN STAR OF HARRIS", "O THE BROWN STAR OF HARRIS"):
+            with self.subTest(recognized=recognized):
+                with mock.patch.object(
+                    self.panel,
+                    "_selected_destination",
+                    side_effect=[recognized, recognized],
+                ):
+                    self.assertTrue(self.panel.lock_destination("THE BROWN STAR OF HARRIS"))
+                self.panel.ap.wait_for_expected_in_system_target.assert_called_once_with("THE BROWN STAR OF HARRIS")
+                self.assertEqual(self.panel.keys.send.call_args_list.count(mock.call("UI_Select")), 2)
+                self.panel.ap.wait_for_expected_in_system_target.reset_mock()
+                self.panel.keys.reset_mock()
+        self.assertFalse(self.panel._destination_matches("EXTRA THE BROWN STAR OF HARRIS", "THE BROWN STAR OF HARRIS"))
+
     def test_target_below_initial_view_is_selected_without_scanning_after_it(self):
         rows = [f"OTHER STATION {index}" for index in range(20)]
         target = "OHM CITY"
@@ -97,6 +112,20 @@ class StationNavigationTestCase(unittest.TestCase):
                 self.assertEqual(self.panel._selected_destination(), repeated)
                 with mock.patch("panels.navigation.monotonic", side_effect=[0, 0, 1, 2, 3]):
                     self.assertEqual(self.panel._next_destination(repeated, 10), expected)
+
+    def test_scrollbar_thumb_is_found_inside_the_panel_not_only_at_the_region_border(self):
+        image = np.zeros((550, 1133, 3), np.uint8)
+        # Panel perspective leaves a gap between the scrollbar and the captured region border.
+        cv2.rectangle(image, (1106, 60), (1115, 200), (0, 150, 220), -1)
+        image[:, 1131:] = 255  # a full-height border line is not a scrollbar thumb
+        self.assertEqual(self.panel._destination_scrollbar_y(image), 130)
+        self.assertIsNone(self.panel._destination_scrollbar_y(np.zeros((550, 1133, 3), np.uint8)))
+
+    def test_bright_track_segment_in_the_thumb_columns_is_ambiguous(self):
+        image = np.zeros((550, 1133, 3), np.uint8)
+        cv2.rectangle(image, (1106, 60), (1115, 200), (0, 150, 220), -1)
+        cv2.rectangle(image, (1106, 250), (1115, 400), (0, 150, 220), -1)
+        self.assertIsNone(self.panel._destination_scrollbar_y(image))
 
     def test_unconfirmed_game_target_is_not_success(self):
         self.panel.ap.wait_for_expected_in_system_target.return_value = False

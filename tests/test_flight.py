@@ -7,6 +7,7 @@ from core.constants import (
     FlagsDocked,
     FlagsFsdCharging,
     FlagsFsdJump,
+    FlagsFsdMassLocked,
     FlagsHasLatLong,
     FlagsLanded,
     FlagsSupercruise,
@@ -96,6 +97,7 @@ class SupercruiseEntryTestCase(unittest.TestCase):
         flight.keys = Mock()
         flight.status = Mock()
         flight.status.get_flag.side_effect = lambda flag: flag == FlagsSupercruise
+        flight.status.get_cleaned_data.return_value = {"Flags": 0}
         flight.jn = Mock()
         flight.jn.ship_state.return_value = {"status": "in_supercruise", "cur_station_type": ""}
         flight.set_ap_status = Mock()
@@ -104,6 +106,87 @@ class SupercruiseEntryTestCase(unittest.TestCase):
         flight.notify_user = Mock()
         flight.pitch_up = Mock()
         return flight
+
+    def test_station_departure_does_not_request_supercruise_until_mass_lock_clears(self):
+        flight = self.flight()
+        ship = flight.jn.ship_state.return_value
+        ship.update(status="in_station", cur_station_type="AsteroidBase", has_adv_dock_comp=True)
+        flight.status.get_flag.side_effect = lambda flag: {
+            FlagsDocked: ship["status"] == "in_station",
+            FlagsSupercruise: ship["status"] == "in_supercruise",
+        }.get(flag, False)
+        flight.undock = Mock(side_effect=lambda: ship.update(status="in_space"))
+        elapsed = 0.0
+        cleared = 25.0
+
+        def wait(seconds):
+            nonlocal elapsed
+            elapsed += seconds
+
+        def send(binding, **_):
+            if binding == "Supercruise":
+                self.assertGreaterEqual(elapsed, cleared)
+                ship["status"] = "in_supercruise"
+
+        flight.status.get_cleaned_data.side_effect = lambda **_: {
+            "Flags": FlagsFsdMassLocked if elapsed < cleared else 0
+        }
+        flight.keys.send.side_effect = send
+        with (
+            patch("routines.flight.time.monotonic", side_effect=lambda: elapsed),
+            patch("routines.flight.sleep", side_effect=wait),
+        ):
+            flight.waypoint_undock_seq()
+            flight.sc_engage()
+
+        flight.keys.send.assert_any_call("Supercruise", hold=0.001)
+        self.assertGreater(flight.keys.send.call_args_list.count(call("UseBoostJuice")), 1)
+        self.assertLess(elapsed, cleared + 1)
+
+    def test_persistent_mass_lock_stops_without_requesting_supercruise(self):
+        flight = self.flight()
+        flight.status.get_cleaned_data.return_value = {"Flags": FlagsFsdMassLocked}
+        with (
+            patch("routines.flight.time.monotonic", side_effect=[0, 0, 60]),
+            patch("routines.flight.sleep"),
+            self.assertLogs("ed_log", level="WARNING"),
+            self.assertRaisesRegex(EdapInterruptError, "mass lock"),
+        ):
+            flight.sc_engage()
+
+        self.assertEqual(flight.keys.send.call_args_list, [call("SetSpeed100"), call("SetSpeedZero")])
+        flight.start_sco_monitoring.assert_not_called()
+        flight.notify_user.assert_called_once()
+
+    def test_unreadable_mass_lock_does_not_authorize_supercruise(self):
+        flight = self.flight()
+        flight.status.get_cleaned_data.side_effect = TimeoutError
+        with (
+            self.assertLogs("ed_log", level="WARNING"),
+            self.assertRaisesRegex(EdapInterruptError, "Could not read FSD mass lock status"),
+        ):
+            flight.sc_engage()
+        self.assertEqual(flight.keys.send.call_args_list, [call("SetSpeed100"), call("SetSpeedZero")])
+
+    def test_hyperspace_charge_waits_for_mass_lock_clear_without_boosting(self):
+        flight = self.flight()
+        flight.jn.ship_state.return_value["status"] = "in_space"
+        flight.config = {"JumpTries": 1}
+        flight.vce = Mock()
+        flight.status.get_cleaned_data.side_effect = [{"Flags": FlagsFsdMassLocked}, {"Flags": 0}]
+        flight.wait_for_fsd_jump_start = Mock(return_value=True)
+
+        def wait(seconds):
+            if seconds == 0.25:
+                flight.keys.send.assert_not_called()
+
+        with patch("routines.flight.sleep", side_effect=wait):
+            self.assertTrue(flight.jump(None))
+
+        self.assertEqual(
+            flight.keys.send.call_args_list,
+            [call("HyperSuperCombination", hold=1), call("SetSpeedZero", repeat=3)],
+        )
 
     def test_engage_waits_for_both_status_and_journal_before_reducing_throttle(self):
         for delayed_source in ("status", "journal"):
@@ -146,7 +229,7 @@ class SupercruiseEntryTestCase(unittest.TestCase):
                 with (
                     patch(
                         "routines.flight.time.monotonic",
-                        side_effect=[0, 0, 60 if journal_status == "starting_supercruise" else 30],
+                        side_effect=[0, 0, 0, 0, 60 if journal_status == "starting_supercruise" else 30],
                     ),
                     patch("routines.flight.sleep"),
                     self.assertLogs("ed_log", level="WARNING"),
@@ -177,7 +260,7 @@ class SupercruiseEntryTestCase(unittest.TestCase):
         flight = self.planetary_flight()
         flight.jn.ship_state.return_value["status"] = "starting_supercruise"
         with (
-            patch("routines.flight.time.monotonic", side_effect=[0, 0, 60]),
+            patch("routines.flight.time.monotonic", side_effect=[0, 0, 0, 0, 60]),
             patch("routines.flight.sleep"),
             self.assertLogs("ed_log", level="WARNING"),
             self.assertRaisesRegex(EdapInterruptError, "supercruise entry"),
@@ -249,7 +332,7 @@ class SupercruiseEntryTestCase(unittest.TestCase):
                         self.assertEqual(flight.keys.send.call_args_list[-1], call("SetSpeed50"))
                     else:
                         with (
-                            patch("routines.flight.time.monotonic", side_effect=[0, 0, 30]),
+                            patch("routines.flight.time.monotonic", side_effect=[0, 0, 0, 0, 30]),
                             self.assertLogs("ed_log", level="WARNING"),
                             self.assertRaisesRegex(EdapInterruptError, "supercruise entry"),
                         ):
@@ -299,7 +382,7 @@ class SupercruiseEntryTestCase(unittest.TestCase):
         flight.status.get_flag.side_effect = lambda flag: flag == FlagsFsdCharging
         flight.jn.ship_state.return_value["status"] = "in_space"
         with (
-            patch("routines.flight.time.monotonic", side_effect=[0, 29, 59, 89]),
+            patch("routines.flight.time.monotonic", side_effect=[0, 0, 0, 29, 59, 89]),
             patch("routines.flight.sleep"),
             self.assertLogs("ed_log", level="WARNING"),
             self.assertRaises(EdapInterruptError),
@@ -320,6 +403,93 @@ class ScLoopRecoveryTestCase(unittest.TestCase):
             if action is not None:
                 actions.append((now, action))
         return actions
+
+    def test_repeated_pitch_with_alternating_hemisphere_reduces_throttle(self):
+        flight = FlightMixin()
+        flight._sc_loop_recovery = ScLoopRecovery()
+        flight.config = {"NavAlignTries": 3}
+        flight.jn = Mock()
+        flight.jn.ship_state.return_value = {"status": "in_supercruise"}
+        offsets = [
+            {"x": 0.08, "y": -0.92, "z": -1.0, "yaw": 168.68, "pit": -112.67, "roll": 175.22},
+            {"x": 0.08, "y": -1.0, "z": -1.0, "yaw": 90.0, "pit": -90.0, "roll": 175.6},
+            {"x": 0.08, "y": -1.0, "z": 1.0, "yaw": 90.0, "pit": -90.0, "roll": 175.6},
+            {"x": 0.12, "y": -0.96, "z": 1.0, "yaw": 24.34, "pit": -75.12, "roll": 173.15},
+            {"x": 0.12, "y": -1.0, "z": -1.0, "yaw": 90.0, "pit": -90.0, "roll": 173.42},
+            {"x": 0.04, "y": -1.0, "z": -1.0, "yaw": 90.0, "pit": -90.0, "roll": 177.8},
+            {"x": 0.12, "y": -1.0, "z": 1.0, "yaw": 90.0, "pit": -90.0, "roll": 173.42},
+        ]
+        flight.read_nav_offset = Mock(side_effect=offsets)
+        flight.try_sc_disengage = Mock(return_value=False)
+        flight.keys = Mock()
+        flight.keys.send.side_effect = EdapInterruptError
+        flight.ap_ckb = Mock()
+        flight.pitch_down = Mock()
+        clock = [0.0]
+
+        def pitch(_degrees):
+            clock[0] += 6
+
+        flight.pitch_down.side_effect = pitch
+        with (
+            patch("routines.flight.time.monotonic", side_effect=lambda: clock[0]),
+            patch("routines.flight.sleep"),
+            self.assertRaises(EdapInterruptError),
+        ):
+            flight.nav_align(None, abort_on_disengage=True)
+
+        self.assertEqual(flight.pitch_down.call_count, 6)
+        self.assertEqual(
+            flight.pitch_down.call_args_list,
+            [call(112.67), call(90.0), call(90.0), call(75.12), call(90.0), call(90.0)],
+        )
+        flight.keys.send.assert_called_once_with("SetSpeed25")
+
+    def test_turn_sequence_resets_for_other_steering_or_missing_compass(self):
+        for interruption in (("yaw_left", 90.0), ("pitch_up", 90.0), ("pitch_down", 20.0), None):
+            with self.subTest(interruption=interruption):
+                recovery = ScLoopRecovery()
+                for now in range(5):
+                    self.assertIsNone(
+                        recovery.observe(self.offset(90, ahead=now % 2 == 0), now, turn=("pitch_down", 90.0))
+                    )
+                if interruption is None:
+                    recovery.observe(None, 5)
+                else:
+                    recovery.observe(self.offset(90, ahead=False), 5, turn=interruption)
+                self.assertIsNone(recovery.observe(self.offset(90), 6, turn=("pitch_down", 90.0)))
+
+    def test_repeated_turns_require_both_count_and_total_and_never_override_centering(self):
+        recovery = ScLoopRecovery()
+        for now in range(7):
+            self.assertIsNone(recovery.observe(self.offset(90, ahead=now % 2 == 0), now, turn=("pitch_down", 75.0)))
+        self.assertEqual(recovery.observe(self.offset(90, ahead=False), 7, turn=("pitch_down", 75.0)), "SetSpeed25")
+
+        recovery = ScLoopRecovery()
+        for now in range(5):
+            self.assertIsNone(recovery.observe(self.offset(90, ahead=now % 2 == 0), now, turn=("pitch_down", 90.0)))
+        self.assertIsNone(recovery.observe(self.offset(0), 5, turn=("pitch_down", 90.0)))
+
+    def test_dropout_before_sixth_turn_reading_preempts_repeated_turn_reduction(self):
+        flight = FlightMixin()
+        flight._sc_loop_recovery = ScLoopRecovery()
+        flight.config = {"NavAlignTries": 3}
+        flight.jn = Mock()
+        flight.jn.ship_state.return_value = {"status": "in_supercruise"}
+        flight.read_nav_offset = Mock(
+            side_effect=[
+                {"x": 0.1, "y": -1.0, "z": 1.0 if i % 2 == 0 else -1.0, "yaw": 90.0, "pit": -90.0, "roll": 175.0}
+                for i in range(6)
+            ]
+        )
+        flight.try_sc_disengage = Mock(side_effect=[False] * 6 + [True])
+        flight.keys = Mock()
+        flight.ap_ckb = Mock()
+        flight.pitch_down = Mock()
+        with patch("routines.flight.sleep"), patch("routines.flight.time.monotonic", return_value=0):
+            self.assertTrue(flight.nav_align(None, abort_on_disengage=True))
+        self.assertEqual(flight.pitch_down.call_count, 6)
+        flight.keys.send.assert_not_called()
 
     def test_persistent_stall_reduces_twice_before_controlled_stop(self):
         recovery = ScLoopRecovery()

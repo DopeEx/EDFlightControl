@@ -130,6 +130,8 @@ match. This screen-reading process is called OCR; you do not need to configure i
 Small destination rows are enlarged before OCR, without substituting similar-looking letters and digits in names.
 Repeated names, such as resource extraction sites, do not by themselves end the search. Highlight or scrollbar
 movement confirms that another same-named row was reached; the assist does not blindly skip unreadable rows.
+For the exact station name, a short OCR artifact at the beginning is ignored only when all remaining words exactly
+match the target. Prefix-only names such as a station name with extra trailing words are never selected.
 Long lists can take longer. The search makes at most two attempts within a two-minute search window;
 closing the panel and checking the selected target can take additional time.
 If the destination cannot be found or confirmed, the assist stops with a message.
@@ -279,7 +281,9 @@ It then waits for the game's transaction confirmation before reducing the remain
 If the dialog clearly shows a different commodity (for example after the game missed a key press),
 the assist closes the dialog, moves the selection by the recognized row offset and re-verifies the
 new dialog before any trade. If a dialog cannot be read, it may close and reopen station services
-and retry once. If the checks still fail, trading stops with a message.
+once; numeric stock/price OCR is not accepted as a commodity name. If the commodity name remains
+unreadable or unconfirmed after that retry, trading stops with a message. The complete localized
+dialog heading and exact commodity name must both be recognized in the dialog before trading.
 
 Requested trading also stops if market services or cargo information cannot be read.
 The route does not guarantee that a market exists or that the station trades your chosen goods.

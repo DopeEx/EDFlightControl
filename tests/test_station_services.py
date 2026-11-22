@@ -341,8 +341,14 @@ class TradeDialogSafetyTestCase(unittest.TestCase):
         ):
             with self.subTest(language=language, title=title, name=name):
                 self.services.locale = LocalizationManager(str(paths.LOCALES_DIR), language)
-                self.services.ocr.image_simple_ocr.side_effect = [[title], [name]]
+                self.services.ocr.image_simple_ocr.side_effect = [[title], [name], None, None]
                 self.assertEqual(self.services.trade_dialog_matches("Polymere", False), expected)
+
+    def test_partial_fallback_title_cannot_confirm_background_commodity(self):
+        self.services.locale = LocalizationManager(str(paths.LOCALES_DIR), "de")
+        self.services.ocr.image_simple_ocr.side_effect = [[], [], ["KAUFEN"], ["POLYMERE"]]
+        self.assertFalse(self.services.trade_dialog_matches("Polymere", False))
+        self.assertIsNone(self.services._last_dialog_commodity)
 
     def test_mismatched_dialog_remembers_recognized_commodity_only_with_valid_title(self):
         for title, name, expected_stored in (
@@ -350,9 +356,10 @@ class TradeDialogSafetyTestCase(unittest.TestCase):
             ("BUY COMMODITY", "POLYMERE", None),
             ("SOMETHING ELSE", "SAMARIUM", None),
             ("BUY COMMODITY", "", None),
+            ("BUY COMMODITY", "4613158", None),
         ):
             with self.subTest(title=title, name=name):
-                self.services.ocr.image_simple_ocr.side_effect = [[title], [name]]
+                self.services.ocr.image_simple_ocr.side_effect = [[title], [name], None, None]
                 self.services.trade_dialog_matches("Polymere", False)
                 self.assertEqual(self.services._last_dialog_commodity, expected_stored)
 

@@ -4,7 +4,7 @@ import random
 import threading
 import time
 from time import sleep
-from typing import Literal
+from typing import Literal, Never
 
 import cv2
 
@@ -62,6 +62,7 @@ TARGET_RECOVERY_TIMEOUT = 30.0
 
 SUPERCRUISE_START_TIMEOUT = 30.0
 SUPERCRUISE_ENTRY_TIMEOUT = 60.0
+FSD_MASS_LOCK_TIMEOUT = 60.0
 
 
 class FlightMixin:
@@ -336,10 +337,13 @@ class FlightMixin:
 
         self.ap_ckb("log+vce", "Compass Align")
 
-        def read_offset(*, corrected=False):
+        if abort_on_disengage and self._sc_loop_recovery is not None:
+            self._sc_loop_recovery.reset_turns()
+
+        def read_offset(*, corrected=False, turn=None):
             off = self.read_nav_offset(scr_reg)
             if abort_on_disengage:
-                self._check_sc_loop_recovery(off, corrected=corrected)
+                self._check_sc_loop_recovery(off, corrected=corrected, turn=turn)
             return off
 
         # try multiple times to get aligned.  If the sun is shining on console, this it will be hard to match
@@ -379,20 +383,24 @@ class FlightMixin:
                             # first roll to get the nav point at the vertical position
                             if off["yaw"] > 0 and off["pit"] > 0:
                                 # top right quad, then roll right to get to 90 up
-                                self.rotate_right(off["roll"])
+                                turn = ("roll_right", off["roll"])
+                                self.rotate_right(turn[1])
                             elif off["yaw"] > 0 > off["pit"]:
                                 # bottom right quad, then roll left
-                                self.rotate_left(180 - off["roll"])
+                                turn = ("roll_left", 180 - off["roll"])
+                                self.rotate_left(turn[1])
                             elif off["yaw"] < 0 < off["pit"]:
                                 # top left quad, then roll left
-                                self.rotate_left(-off["roll"])
+                                turn = ("roll_left", -off["roll"])
+                                self.rotate_left(turn[1])
                             else:
                                 # bottom left quad, then roll right
-                                self.rotate_right(180 + off["roll"])
+                                turn = ("roll_right", 180 + off["roll"])
+                                self.rotate_right(turn[1])
                             sleep(1)
                             if abort_on_disengage and self.try_sc_disengage(scr_reg):
                                 return True
-                            off = read_offset(corrected=True)
+                            off = read_offset(corrected=True, turn=turn)
                             logger.debug(f"Compass align roll step {i + 1}: {off}")
                             if off is None:
                                 break
@@ -407,13 +415,15 @@ class FlightMixin:
                     # Calc pitch time based on nav point location
                     if abs(off["pit"]) >= close:
                         if off["pit"] < 0:
-                            self.pitch_down(abs(off["pit"]))
+                            turn = ("pitch_down", abs(off["pit"]))
+                            self.pitch_down(turn[1])
                         else:
-                            self.pitch_up(abs(off["pit"]))
+                            turn = ("pitch_up", abs(off["pit"]))
+                            self.pitch_up(turn[1])
                         sleep(0.5)
                         if abort_on_disengage and self.try_sc_disengage(scr_reg):
                             return True
-                        off = read_offset(corrected=True)
+                        off = read_offset(corrected=True, turn=turn)
                         if off is None or (reroll < NAV_ALIGN_MAX_REROLLS and self.nav_needs_reroll(off, close)):
                             break
                     else:
@@ -431,13 +441,15 @@ class FlightMixin:
                     break
                 if abs(off["yaw"]) >= close:
                     if off["yaw"] < 0:
-                        self.yaw_left(abs(off["yaw"]))
+                        turn = ("yaw_left", abs(off["yaw"]))
+                        self.yaw_left(turn[1])
                     else:
-                        self.yaw_right(abs(off["yaw"]))
+                        turn = ("yaw_right", abs(off["yaw"]))
+                        self.yaw_right(turn[1])
                     sleep(0.5)
                     if abort_on_disengage and self.try_sc_disengage(scr_reg):
                         return True
-                    off = read_offset(corrected=True)
+                    off = read_offset(corrected=True, turn=turn)
                 else:
                     break
 
@@ -690,7 +702,7 @@ class FlightMixin:
             f"(sun avoid + compass align {coarse_time:.1f}s), retry={retry}."
         )
 
-    def _check_sc_loop_recovery(self, off, *, corrected=False):
+    def _check_sc_loop_recovery(self, off, *, corrected=False, turn=None):
         recovery = self._sc_loop_recovery
         if recovery is None or self.jn.ship_state()["status"] != "in_supercruise":
             return
@@ -704,7 +716,12 @@ class FlightMixin:
                 self._sc_loop_recovery = None
                 self._sc_loop_target = None
                 return
-        action = recovery.observe(off, time.monotonic(), corrected=corrected)
+        action = recovery.observe(off, time.monotonic(), corrected=corrected, turn=turn)
+        if recovery.repeated_turn_reduction is not None:
+            direction, count, degrees = recovery.repeated_turn_reduction
+            logger.debug(
+                "SC loop recovery: %s repeated %s turns reached %.1f nominal degrees.", count, direction, degrees
+            )
         if corrected:
             logger.debug(
                 "SC loop recovery sample: stage=%s offset=%s samples=%s corrections=%s",
@@ -1105,6 +1122,7 @@ class FlightMixin:
                 logger.info(f"FSD retry {i + 1}: realigning before the next charge.")
                 self.mnvr_to_target(scr_reg, retry=True)
             sleep(0.5)
+            self._wait_for_mass_lock_clear()
             logger.debug(f"FSD jump attempt {i + 1}: sending HyperSuperCombination.")
 
             self.keys.send("HyperSuperCombination", hold=1)
@@ -1314,9 +1332,7 @@ class FlightMixin:
 
                     self.keys.send("SetSpeed100")
 
-                    # While Mass Locked, keep boosting.
-                    while not self.status.wait_for_flag_off(FlagsFsdMassLocked, timeout=2):
-                        self.keys.send("UseBoostJuice")
+                    self._wait_for_mass_lock_clear(boost=True)
 
                     # Enter supercruise to get away from the Fleet Carrier
                     self.keys.send("Supercruise")
@@ -1337,8 +1353,6 @@ class FlightMixin:
                     self.keys.send("SetSpeed100")
                     sleep(1)
                     self.keys.send("UseBoostJuice")
-                    sleep(13)  # get away from Station
-                    self.keys.send("SetSpeed50")
 
         elif on_planet:
             # Check if we are on a landing pad (docked), or landed on the planet surface
@@ -1371,9 +1385,7 @@ class FlightMixin:
             self.pitch_up(90 * 1.25)
             self.keys.send("SetSpeed100")
 
-            # While Mass Locked, keep boosting.
-            while not self.status.wait_for_flag_off(FlagsFsdMassLocked, timeout=2):
-                self.keys.send("UseBoostJuice")
+            self._wait_for_mass_lock_clear(boost=True)
 
             # Enter supercruise
             self.keys.send("Supercruise")
@@ -1394,12 +1406,38 @@ class FlightMixin:
             self.keys.send("UseBoostJuice")
             self.keys.send("SetSpeed50")
 
-    def _abort_departure(self, message):
+    def _abort_departure(self, message) -> Never:
         self.stop_sco_monitoring()
         self.keys.send("SetSpeedZero")
         logger.warning(message)
         self.notify_user(message)
         raise EdapInterruptError(message)
+
+    def _wait_for_mass_lock_clear(self, *, boost: bool = False) -> None:
+        """Only return after Status.json reports that the FSD is no longer mass locked."""
+        start = time.monotonic()
+        deadline = start + FSD_MASS_LOCK_TIMEOUT
+        next_boost = start + 2.0
+        waiting = False
+        while (now := time.monotonic()) < deadline:
+            try:
+                flags = self.status.get_cleaned_data(timeout=deadline - now)["Flags"]
+            except (FileNotFoundError, TimeoutError) as exc:
+                logger.debug("Could not read mass lock from Status.json: %s", exc)
+                self._abort_departure("Could not read FSD mass lock status. Assist stopped.")
+            if not flags & FlagsFsdMassLocked:
+                logger.debug("FSD mass lock clear after %.1fs.", now - start)
+                return
+            if not waiting:
+                logger.debug("Waiting up to %.0fs for FSD mass lock to clear.", FSD_MASS_LOCK_TIMEOUT)
+                waiting = True
+            if boost and now >= next_boost:
+                self.keys.send("UseBoostJuice")
+                next_boost = now + 2.0
+            sleep(0.25)
+        self._abort_departure(
+            f"FSD mass lock did not clear within {FSD_MASS_LOCK_TIMEOUT:.0f} seconds. Assist stopped."
+        )
 
     def _wait_for_supercruise(self):
         start = time.monotonic()
@@ -1433,8 +1471,9 @@ class FlightMixin:
 
     def sc_engage(self):
         """Engages supercruise, then returns us to 50% speed"""
-        self.set_ap_status("Entering supercruise")
         self.keys.send("SetSpeed100")
+        self._wait_for_mass_lock_clear(boost=True)
+        self.set_ap_status("Entering supercruise")
         self.keys.send("Supercruise", hold=0.001)
         # Start SCO monitoring
         self.start_sco_monitoring()

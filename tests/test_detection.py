@@ -15,7 +15,7 @@ import cv2
 import numpy as np
 
 from core import paths
-from core.constants import FlagsBeingInterdicted, FlagsFsdJump, FlagsSupercruise
+from core.constants import FlagsBeingInterdicted, FlagsFsdJump, FlagsFsdMassLocked, FlagsSupercruise
 from core.types import EdapInterruptError
 from gui.cv_view import CvFrames
 from routines.flight import FlightMixin
@@ -30,12 +30,17 @@ class Detector(DetectionMixin):
         self.cv_frames = CvFrames()
 
 
+class InterdictionDetector(Detector, FlightMixin):
+    pass
+
+
 class InterdictionTestCase(unittest.TestCase):
     def detector(self):
-        detector = Detector()
+        detector = InterdictionDetector()
         detector.status = Mock()
         detector.status.get_flag.side_effect = lambda flag: flag in (FlagsBeingInterdicted, FlagsFsdJump)
         detector.status.get_flag2.return_value = False
+        detector.status.get_cleaned_data.return_value = {"Flags": 0}
         detector.status.wait_for_flag_off.return_value = True
         detector.jn = Mock()
         detector.jn.ship_state.return_value = {"status": "starting_supercruise", "interdicted": True}
@@ -89,7 +94,7 @@ class InterdictionTestCase(unittest.TestCase):
                 if journal_ready:
                     detector.jn.ship_state.return_value["status"] = "in_supercruise"
                 with (
-                    patch("vision.detection.time.monotonic", side_effect=[0, 0, 60]),
+                    patch("vision.detection.time.monotonic", side_effect=[0, 0, 0, 0, 60]),
                     patch("vision.detection.sleep"),
                     self.assertLogs("ed_log", level="WARNING"),
                     self.assertRaisesRegex(TimeoutError, "supercruise after interdiction"),
@@ -101,6 +106,25 @@ class InterdictionTestCase(unittest.TestCase):
                 )
                 if not status_ready:
                     detector.keys.send.assert_any_call("UseBoostJuice")
+
+    def test_reentry_waits_for_mass_lock_clear_after_cooldown(self):
+        detector = self.detector()
+        supercruise = iter([False, True])
+        detector.status.get_flag.side_effect = lambda flag: (
+            next(supercruise) if flag == FlagsSupercruise else flag == FlagsBeingInterdicted
+        )
+        detector.status.get_cleaned_data.side_effect = [{"Flags": FlagsFsdMassLocked}, {"Flags": 0}]
+        detector.jn.ship_state.return_value["status"] = "in_supercruise"
+
+        def waiting(seconds):
+            self.assertEqual(seconds, 0.25)
+            detector.keys.send.assert_called_once_with("SetSpeed100")
+
+        with patch("routines.flight.sleep", side_effect=waiting) as wait:
+            self.assertTrue(detector.interdiction_check())
+
+        wait.assert_called_once()
+        detector.keys.send.assert_called_with("Supercruise")
 
     def test_boosts_only_until_transition_starts(self):
         detector = self.detector()

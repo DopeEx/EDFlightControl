@@ -78,7 +78,7 @@ class DetectionMixin:
         while not self.status.wait_for_flag_off(FlagsFsdCooldown, timeout=1):
             self.keys.send("UseBoostJuice")
 
-        # Cooldown over, get us out of here.
+        self._wait_for_mass_lock_clear(boost=True)
         self.keys.send("Supercruise")
 
         # Start SCO monitoring
