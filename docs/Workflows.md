@@ -32,6 +32,10 @@ This document summarizes the behavior currently implemented and lists a small nu
    15 seconds, hemisphere changes, or angular-error jumps over 30 degrees restart the evidence window.
    A cumulative improvement of at least 10 degrees renews the progress window.
    After 15 seconds without such progress it selects 25% throttle, then 0% after another 10 seconds without progress.
+   As an additional first-reduction signal, six consecutive turns of at least 75 nominal degrees in the same direction
+   totaling at least 540 nominal degrees select 25% even when alternating compass hemispheres reset the progress
+   window. Other steering directions, smaller turns, missing compass readings, long reading gaps, or an ahead-centered
+   compass reset that turn sequence. The angles describe requested inputs, not measured ship movement.
    Zero throttle in supercruise still means forward movement. After 30 seconds without progress at 0%, it stops the
    assist with a user message. From 60 seconds after the first reduction, a confirmed stall of at least 15 seconds
    at 0% can also stop recovery; elapsed time alone or missing/inconsistent readings never trigger this new stop.
@@ -53,6 +57,12 @@ This document summarizes the behavior currently implemented and lists a small nu
    the docking attempt stops with an error instead of retrying selection in an unknown tab.
 7. Once docked, the docking sequence selects refuel, repair, and ammunition services. The local-target phase does not
    run a waypoint trade sequence.
+
+Before requesting supercruise or starting a hyperspace charge, Travel and Waypoint Assist wait for the FSD mass-lock
+flag in Status.json to clear. This also applies to supercruise re-entry after interdiction. Normal station departures
+no longer assume the ship is clear after a fixed delay. While waiting to enter supercruise, the assist boosts in
+normal space; waiting before a hyperspace charge does not add boost inputs. If mass lock is still active after
+60 seconds or the status cannot be read, the assist stops with a message and selects zero throttle.
 
 Supercruise entry requested by `sc_engage()` or during a planetary/Fleet Carrier departure must be confirmed by
 both Status.json and the journal's `in_supercruise` state before subsequent flight steps.
@@ -480,8 +490,11 @@ These are deferred improvements for future consideration.
   realignment, and uninterrupted disengage detection before adjusting its thresholds.
 - Refine station-name screen reading for additional destination icons and HUD layouts as examples become available.
   Bookmarks remain an alternative when a destination cannot be read reliably.
-- Avoid changing hyperspace-interdiction recovery until there is a reliable way to validate it. Interdiction attempts
-  are too unpredictable for routine testing: they may not occur for days, then happen several times within an hour.
+- Extend the existing hyperspace-interdiction recovery so it takes priority over every autopilot task, not only
+  normal-space flight. Interdiction detection already exists; when it occurs during another task, such as selecting
+  a system target, interrupt that task, run the existing recovery, then resume the interrupted task if it is still
+  valid. Interdiction attempts are too unpredictable for routine testing: they may not occur for days, then happen
+  several times within an hour.
 - Verify the screen-capture channel order and simplify the related color conversions only if vision regression tests
   confirm the expected colors in both captured-screen and supplied-image modes.
 - Assess explicit state confirmation for Orbital Construction Services instead of relying on a fixed menu-render delay.
