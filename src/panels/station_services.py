@@ -184,8 +184,12 @@ class EDStationServicesInShip:
         title_key = "STN_SVCS_SELL_COMMODITY" if selling else "STN_SVCS_BUY_COMMODITY"
         titles = [normalize_text(value) for value in self.locale.all_values(title_key) if value != "?"]
         matched = bool(expected) and title in titles and actual == expected
+        # Numeric OCR from the stock column must never become a commodity name for cursor correction.
+        numeric_stock = actual.translate(str.maketrans("", "", "., ")).isdigit() if actual else False
         # Remember the commodity shown in a mismatched dialog so the cursor offset can be corrected.
-        self._last_dialog_commodity = actual if (not matched and title in titles and actual) else None
+        self._last_dialog_commodity = (
+            actual if (not matched and title in titles and actual and not numeric_stock) else None
+        )
         if logger.isEnabledFor(logging.DEBUG):
             self._trade_debug_images = (title_image.copy(), name_image.copy()) if not matched else None
         logger.debug(

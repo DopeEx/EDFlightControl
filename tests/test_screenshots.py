@@ -13,6 +13,7 @@ none. The file names tell what is expected:
  - trade-buy / trade-sell: the modal commodity and transaction direction match; background goods do not
  - market-list: the active buy/sell list heading matches, independently of focus and details
  - nav-panel: the selected system/navigation/transactions/contacts tab is identified in both color schemes
+ - scrollbar-mid-list: the navigation list scrollbar thumb is located inside the captured panel region
  - internal-panel: the selected right-panel tab, including icon tabs, is identified in both color schemes
 Screenshots whose names contain "crop" or "head-turned" are ignored.
 Diagnostic crops are replayed separately from full-screen fixtures; later navigation panel views are context only.
@@ -53,6 +54,9 @@ GALAXY_MAP_SCREENSHOTS = tuple(sorted(SCREENSHOTS.glob("*p/*galaxy-map*.png")))
 NAV_PANEL_SCREENSHOTS = tuple(sorted(SCREENSHOTS.glob("*p/*nav-panel*.png")))
 INTERNAL_PANEL_SCREENSHOTS = tuple(sorted(SCREENSHOTS.glob("*p/*internal-panel*.png")))
 NAVIGATION_FAILURES = SCREENSHOTS / "diagnostics" / "navigation-failures-20261118"
+NAVIGATION_SCROLLBAR = SCREENSHOTS / "diagnostics" / "navigation-scrollbar-20261120"
+NAVIGATION_PREFIX = SCREENSHOTS / "diagnostics" / "navigation-prefix-20261120"
+TRADE_DIAGNOSTICS = SCREENSHOTS / "diagnostics" / "trade-dialog-20261120"
 
 
 def screenshot_language(path):
@@ -99,6 +103,42 @@ class NavigationFailureScreenshotTestCase(unittest.TestCase):
                 ):
                     self.assertEqual(panel._selected_destination(), expected)
                 failure.assert_not_called()
+
+
+class NavigationScrollbarScreenshotTestCase(unittest.TestCase):
+    def test_thumb_is_found_despite_the_perspective_inset_from_the_region_border(self):
+        crops = [path for path in sorted(NAVIGATION_SCROLLBAR.glob("*_de.png")) if "context" not in path.stem]
+        screenshots = tuple(sorted(SCREENSHOTS.glob("*p/*scrollbar-mid-list*.png")))
+        if not crops and not screenshots:
+            self.skipTest("local navigation scrollbar fixtures unavailable")
+        for path in crops:
+            with self.subTest(screenshot=path.name):
+                self.assertIsNotNone(EDNavigationPanel._destination_scrollbar_y(load_screenshot(path)))
+        for path in screenshots:
+            with self.subTest(screenshot=path.name):
+                screen = ScreenshotScreen(load_screenshot(path))
+                region = screen.get_screen_rect_pct([0.11, 0.35, 0.70, 0.86])
+                self.assertIsNotNone(EDNavigationPanel._destination_scrollbar_y(region))
+
+
+class NavigationPrefixScreenshotTestCase(unittest.TestCase):
+    def test_short_leading_icon_text_is_only_accepted_as_the_exact_station_suffix(self):
+        for name in sorted(NAVIGATION_PREFIX.glob("*name-crop.png")):
+            if not name.is_file():
+                continue
+            with self.subTest(screenshot=name.name):
+                image = load_screenshot(name)
+                self.assertGreater(image.shape[0], 20)
+                self.assertGreater(image.shape[1], 300)
+        self.assertTrue(
+            EDNavigationPanel._destination_matches("1A THE BROWN STAR OF HARRIS", "THE BROWN STAR OF HARRIS")
+        )
+        self.assertTrue(
+            EDNavigationPanel._destination_matches("O THE BROWN STAR OF HARRIS", "THE BROWN STAR OF HARRIS")
+        )
+        self.assertFalse(
+            EDNavigationPanel._destination_matches("EXTRA THE BROWN STAR OF HARRIS", "THE BROWN STAR OF HARRIS")
+        )
 
 
 @skipUnless(OCR is not None and NAV_PANEL_SCREENSHOTS, "PaddleOCR or local navigation-panel screenshots unavailable")
@@ -400,6 +440,28 @@ class MarketListScreenshotTestCase(unittest.TestCase):
 
 @skipUnless(OCR is not None and TRADE_SCREENSHOTS, "PaddleOCR or local trade-dialog screenshots unavailable")
 class TradeDialogScreenshotTestCase(unittest.TestCase):
+    def test_downscaled_buy_and_sell_dialogs_require_matching_commodity_and_direction(self):
+        dialog_paths = [
+            path
+            for path in TRADE_SCREENSHOTS
+            if "trade-buy_polymere" in path.name or "trade-sell_polymere" in path.name
+        ]
+        if not dialog_paths:
+            self.skipTest("local polymers trade-dialog screenshots unavailable")
+        engines = {}
+        services = EDStationServicesInShip.__new__(EDStationServicesInShip)
+        for path in dialog_paths:
+            with self.subTest(screenshot=path.name):
+                frame = cv2.resize(load_screenshot(path), (1920, 1080), interpolation=cv2.INTER_AREA)
+                services.screen = ScreenshotScreen(frame)
+                services.ocr = screenshot_ocr(path, engines)
+                services.ocr.screen = services.screen
+                services.locale = LocalizationManager(str(paths.LOCALES_DIR), screenshot_language(path))
+                selling = "trade-sell" in path.name
+                self.assertTrue(services.trade_dialog_matches("Polymere", selling))
+                self.assertFalse(services.trade_dialog_matches("Halbleiter", selling))
+                self.assertFalse(services.trade_dialog_matches("Polymere", not selling))
+
     def test_sell_dialog_quantity_in_existing_polymers_fixtures(self):
         engines = {}
         for path in (path for path in TRADE_SCREENSHOTS if "trade-sell_polymere" in path.name):
@@ -414,6 +476,25 @@ class TradeDialogScreenshotTestCase(unittest.TestCase):
                 services.ocr.screen = services.screen
                 self.assertEqual(services.read_sell_quantity(), (6, 6))
 
+    def test_native_1080p_sell_dialog_quantity(self):
+        dialog_paths = [
+            path
+            for path in TRADE_SCREENSHOTS
+            if path.parent.name == "1080p"
+            and "trade-sell" in path.name
+            and any(commodity in path.stem.split("_") for commodity in ("scrap", "agronomic-treatment"))
+        ]
+        if not dialog_paths:
+            self.skipTest("local native 1080p sell-dialog screenshots unavailable")
+        engines = {}
+        services = EDStationServicesInShip.__new__(EDStationServicesInShip)
+        for path in dialog_paths:
+            with self.subTest(screenshot=path.name):
+                services.screen = ScreenshotScreen(load_screenshot(path))
+                services.ocr = screenshot_ocr(path, engines)
+                services.ocr.screen = services.screen
+                self.assertEqual(services.read_sell_quantity(), (5, 5))
+
     def test_selected_commodity_and_direction_in_both_color_schemes(self):
         engines = {}
         for path in TRADE_SCREENSHOTS:
@@ -425,7 +506,12 @@ class TradeDialogScreenshotTestCase(unittest.TestCase):
                 services.ocr = ocr
                 ocr.screen = services.screen
                 selling = "trade-sell" in path.name
-                name = "Halbleiter" if "halbleiter" in path.name else "Polymere"
+                if "scrap" in path.stem.split("_"):
+                    name = "Schrott"
+                elif "agronomic-treatment" in path.stem.split("_"):
+                    name = "Agronomic Treatment"
+                else:
+                    name = "Halbleiter" if "halbleiter" in path.name else "Polymere"
                 self.assertTrue(services.trade_dialog_matches(name, selling))
                 self.assertFalse(
                     services.trade_dialog_matches("Polymere" if name == "Halbleiter" else "Halbleiter", selling)
@@ -441,6 +527,35 @@ class TradeDialogScreenshotTestCase(unittest.TestCase):
                 ocr.screen = services.screen
                 self.assertFalse(services.trade_dialog_matches("Polymere", False))
                 self.assertFalse(services.trade_dialog_matches("Polymere", True))
+
+    def test_1080p_dialog_and_market_list_diagnostic_contexts(self):
+        cases = (
+            ("04_trade-buy_bauxite-dialog-context_de.png", "Bauxit", True),
+            ("03_trade-buy_unconfirmed-isoliermembran-context_de.png", "Tritium", False),
+        )
+        if not all((TRADE_DIAGNOSTICS / name).is_file() for name, _, _ in cases):
+            self.skipTest("local 1080p trade diagnostic contexts unavailable")
+
+        engines = {}
+        services = EDStationServicesInShip.__new__(EDStationServicesInShip)
+        services.locale = LocalizationManager(str(paths.LOCALES_DIR), "de")
+        for filename, commodity, expected in cases:
+            with self.subTest(screenshot=filename):
+                path = TRADE_DIAGNOSTICS / filename
+                context = load_screenshot(path)
+                self.assertEqual(context.shape[:2], (756, 1152))
+                frame = np.zeros((1080, 1920, 3), dtype=np.uint8)
+                frame[162:918, 384:1536] = context
+                services.screen = ScreenshotScreen(frame)
+                services.ocr = screenshot_ocr(path, engines)
+                services.ocr.screen = services.screen
+                self.assertEqual(services.trade_dialog_matches(commodity, False), expected)
+                self.assertFalse(services.trade_dialog_matches(commodity, True))
+                if expected:
+                    self.assertFalse(services.trade_dialog_matches("Bertrandit", False))
+                    self.assertEqual(services._last_dialog_commodity, "BAUXIT")
+                else:
+                    self.assertFalse(services.trade_dialog_matches("Isoliermembran", False))
 
 
 if __name__ == "__main__":

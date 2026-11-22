@@ -6,6 +6,12 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Wait for Status.json to confirm that FSD mass lock has cleared before supercruise entry or hyperspace charging; unreadable status or a timeout now stops the assist safely.
+- Reduce throttle during supercruise loop recovery after six large same-direction steering inputs, even when compass hemisphere changes interrupt the usual progress evidence.
+- Improve station and trade confirmation: station searches tolerate a short OCR artifact only before an exact name, find inset scrollbar thumbs, and reject numeric stock text or incomplete trade-dialog headings.
+
 ## [2.2.1] - 2026-11-20
 
 ### Fixed

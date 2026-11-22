@@ -147,14 +147,27 @@ class EDNavigationPanel:
 
     @staticmethod
     def _destination_scrollbar_y(image) -> int | None:
-        strip = image[:, -max(2, round(image.shape[1] * 0.006)) :, :3]
+        """Locate the scrollbar thumb; panel perspective can shift it well inside the captured region."""
+        height, width = image.shape[:2]
+        strip = image[:, int(width * 0.85) :, :3]
         _, _, stats, centers = cv2.connectedComponentsWithStats((strip.max(axis=2) >= 140).astype(np.uint8))
         bars = [
-            round(center[1])
-            for (_x, _y, width, height, area), center in zip(stats[1:], centers[1:])
-            if width >= 2 and height >= image.shape[0] * 0.04 and height >= 4 * width and area >= width * height * 0.6
+            (x, x + w, round(center[1]))
+            for (x, _y, w, h, area), center in zip(stats[1:], centers[1:])
+            if 2 <= w <= max(4, round(width * 0.012))
+            and height * 0.04 <= h <= height * 0.9
+            and h >= 4 * w
+            and area >= w * h * 0.6
         ]
-        return bars[0] if len(bars) == 1 else None
+        if not bars:
+            return None
+        # The thumb is the rightmost thin bar; list text stays left of it. Track pieces above or below the
+        # thumb would share its columns, making the reading ambiguous.
+        bars.sort(key=lambda bar: bar[1])
+        left, right, y = bars[-1]
+        if any(other_right > left and other_left < right for other_left, other_right, _y in bars[:-1]):
+            return None
+        return y
 
     @staticmethod
     def _destination_name_image(row):
@@ -220,6 +233,16 @@ class EDNavigationPanel:
             )
         return cropped
 
+    @staticmethod
+    def _destination_matches(parsed_name: str, expected: str) -> bool:
+        if parsed_name == expected:
+            return True
+        prefix, separator, suffix = parsed_name.partition(" ")
+        if not separator or suffix != expected:
+            return False
+        prefix = prefix.strip()
+        return 1 <= len(prefix) <= 3 and prefix.replace("-", "").isalnum()
+
     def _next_destination(self, previous: str, deadline: float) -> str | None:
         previous_position = getattr(self, "_destination_position", None)
         self.keys.send("UI_Down")
@@ -271,12 +294,12 @@ class EDNavigationPanel:
                 current,
                 parsed_name,
                 expected,
-                parsed_name == expected,
+                self._destination_matches(parsed_name, expected),
             )
-            if parsed_name == expected:
+            if self._destination_matches(parsed_name, expected):
                 # Re-read before selection; never rely on a counted row position.
                 reread = self._selected_destination()
-                if reread != current:
+                if not (self._destination_matches(reread, expected) and self._destination_matches(current, expected)):
                     logger.debug("Station OCR row changed before selection: previous=%r current=%r", current, reread)
                     self._save_last_destination_failure("row-changed")
                     return False
